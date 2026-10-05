@@ -11,22 +11,24 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# --- CONFIGURATION ---
+# These values control where the modpack is downloaded from and which Minecraft
+# and Fabric versions are installed. Keeping them together makes updates easier.
 GITHUB_USER = "Amne-Dev"
 GITHUB_REPO = "ConfettiaSMP"
 GITHUB_BRANCH = "master"
 
 MODPACK_URL = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
 MOJANG_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-FABRIC_PROFILE_URL = "https://meta.fabricmc.net/v2/versions/loader/1.21.1/profile/json"
 FABRIC_LOADERS_URL = "https://meta.fabricmc.net/v2/versions/loader/1.21.1"
 
 APP_TITLE = "ConfettiaSMP Modpack Installer"
 CUSTOM_VERSION_ID = "ConfettiaSMP-1.21.1"
 PROFILE_NAME = "ConfettiaSMP (1.21.1)"
-WINDOW_SIZE = "520x400"
+WINDOW_SIZE = "640x500"
+ICON_PATH = Path(__file__).resolve().with_name("confettia.ico")
 
-# --- COLOR PALETTE (Minecraft Dark Theme) ---
+# Colors used by the installer window. They are grouped here so the appearance
+# can be changed without searching through the user-interface code.
 COLOR_BG = "#1E1E1E"
 COLOR_PANEL = "#252526"
 COLOR_TEXT = "#FFFFFF"
@@ -37,7 +39,7 @@ COLOR_BORDER = "#3E3E42"
 
 
 def get_default_mc_dir() -> Path:
-    """Detects standard .minecraft directory across OS platforms."""
+    """Return the normal Minecraft folder for the current operating system."""
     system = platform.system()
     if system == "Windows":
         return Path(os.getenv("APPDATA", "")) / ".minecraft"
@@ -48,7 +50,7 @@ def get_default_mc_dir() -> Path:
 
 
 def get_default_prism_dir() -> Path:
-    """Detects standard Prism Launcher instances directory across OS platforms."""
+    """Return Prism Launcher's instances folder for the current operating system."""
     system = platform.system()
     if system == "Windows":
         appdata = Path(os.getenv("APPDATA", "")) / "PrismLauncher" / "instances"
@@ -64,11 +66,16 @@ def get_default_prism_dir() -> Path:
 
 
 def ensure_vanilla_1_21_1(target_root: Path, status_callback=None):
-    """Downloads Minecraft 1.21.1 manifest and client JAR if missing from versions/1.21.1."""
+    """Make sure the vanilla Minecraft 1.21.1 JSON and client JAR are installed.
+
+    The custom Fabric version inherits from vanilla Minecraft, so the official
+    launcher needs these two files before it can start the custom profile.
+    """
     v_dir = target_root / "versions" / "1.21.1"
     v_json = v_dir / "1.21.1.json"
     v_jar = v_dir / "1.21.1.jar"
 
+    # Avoid downloading large files again when the user runs the installer twice.
     if v_json.exists() and v_jar.exists():
         return
 
@@ -81,6 +88,7 @@ def ensure_vanilla_1_21_1(target_root: Path, status_callback=None):
     with urllib.request.urlopen(req) as resp:
         manifest = json.loads(resp.read().decode('utf-8'))
 
+    # Find the exact Minecraft version instead of assuming it is first in the list.
     v_info = next((v for v in manifest.get("versions", []) if v.get("id") == "1.21.1"), None)
     if not v_info:
         raise RuntimeError("Could not locate Minecraft 1.21.1 in Mojang version manifest.")
@@ -105,7 +113,12 @@ def ensure_vanilla_1_21_1(target_root: Path, status_callback=None):
 
 
 def fetch_fabric_version_data(target_root: Path) -> dict:
-    """Reads local Fabric 1.21.1 profile if present, or fetches it directly from Fabric Meta API."""
+    """Load Fabric's launcher profile from disk or from the Fabric API.
+
+    A local profile is preferred because it avoids an unnecessary network
+    request. If none exists, the API is queried for a stable loader and its
+    matching launcher profile.
+    """
     v_dir = target_root / "versions"
     if v_dir.exists():
         for folder in v_dir.iterdir():
@@ -118,13 +131,24 @@ def fetch_fabric_version_data(target_root: Path) -> dict:
                     except Exception:
                         pass
 
-    req = urllib.request.Request(FABRIC_PROFILE_URL, headers={'User-Agent': 'Mozilla/5.0'})
+    loader_req = urllib.request.Request(FABRIC_LOADERS_URL, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(loader_req) as resp:
+        loaders = json.loads(resp.read().decode('utf-8'))
+
+    # The API returns several loader versions. Choose the first stable one,
+    # which is the newest stable version in the API response.
+    loader = next((item["loader"]["version"] for item in loaders if item.get("loader", {}).get("stable")), None)
+    if not loader:
+        raise RuntimeError("Could not locate a stable Fabric loader for Minecraft 1.21.1.")
+
+    profile_url = f"https://meta.fabricmc.net/v2/versions/loader/1.21.1/{loader}/profile/json"
+    req = urllib.request.Request(profile_url, headers={'User-Agent': 'Mozilla/5.0'})
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 
 def fetch_latest_fabric_loader_version() -> str:
-    """Queries Fabric Meta API for the latest stable loader version for 1.21.1."""
+    """Return the newest Fabric loader version available for Minecraft 1.21.1."""
     try:
         req = urllib.request.Request(FABRIC_LOADERS_URL, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as resp:
@@ -137,7 +161,7 @@ def fetch_latest_fabric_loader_version() -> str:
 
 
 def register_version_profile(target_dir: Path, version_id: str):
-    """Registers the custom version profile in launcher_profiles.json."""
+    """Add the installed custom version to the launcher's profile list."""
     if not target_dir.exists():
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -152,6 +176,8 @@ def register_version_profile(target_dir: Path, version_id: str):
         "lastVersionId": version_id
     }
 
+    # Different Minecraft Launcher versions use different profile filenames,
+    # so update both when they are available or can be created.
     for filename in ["launcher_profiles.json", "profiles.json"]:
         file_path = target_dir / filename
         data = {"profiles": {}}
@@ -179,7 +205,12 @@ def register_version_profile(target_dir: Path, version_id: str):
 
 
 def extract_modpack_zip(temp_zip: Path, target_mods_dir: Path, target_root_dir: Path):
-    """Extracts zip content mapping 'mods' to target_mods_dir and root configs to target_root_dir."""
+    """Copy modpack files into the launcher-specific Minecraft directories.
+
+    GitHub puts the repository contents inside a top-level folder in the ZIP.
+    That folder is skipped, then mods and configuration files are routed to
+    their appropriate Minecraft locations.
+    """
     with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
         for member in zip_ref.infolist():
             path_parts = Path(member.filename).parts
@@ -189,6 +220,8 @@ def extract_modpack_zip(temp_zip: Path, target_mods_dir: Path, target_root_dir: 
             rel_path = Path(*path_parts[1:])
             first_folder = rel_path.parts[0].lower()
 
+            # Mods belong in the launcher's mods folder; shared game settings
+            # belong beside it in the Minecraft root folder.
             if first_folder == "mods":
                 target_path = target_mods_dir / rel_path.relative_to("mods")
             elif first_folder in {"config", "resourcepacks", "shaderpacks", "options.txt"}:
@@ -205,7 +238,7 @@ def extract_modpack_zip(temp_zip: Path, target_mods_dir: Path, target_root_dir: 
 
 
 def build_official_version_package(target_root: Path, temp_zip: Path, clean_mods: bool, status_callback=None):
-    """Compiles versions/ConfettiaSMP-1.21.1 for standard Minecraft Launcher."""
+    """Create a Fabric version that can be selected in the official launcher."""
     ensure_vanilla_1_21_1(target_root, status_callback)
 
     if status_callback:
@@ -226,10 +259,12 @@ def build_official_version_package(target_root: Path, temp_zip: Path, clean_mods
             elif item.is_dir():
                 shutil.rmtree(item)
 
+    # Turn Fabric's generic profile into this modpack's custom version.
     vdata["id"] = CUSTOM_VERSION_ID
     vdata["inheritsFrom"] = "1.21.1"
     vdata["jar"] = "1.21.1"
 
+    # Fabric reads mods from this directory when the custom version starts.
     add_mods_arg = f"-Dfabric.addMods={version_mods_dir.resolve()}"
 
     if "arguments" in vdata and "jvm" in vdata["arguments"]:
@@ -251,7 +286,7 @@ def build_official_version_package(target_root: Path, temp_zip: Path, clean_mods
 
 
 def build_prism_instance(instances_dir: Path, temp_zip: Path, clean_mods: bool, status_callback=None):
-    """Creates a standalone Prism Launcher instance under instances/ConfettiaSMP."""
+    """Create or update a standalone ConfettiaSMP instance for Prism Launcher."""
     instance_dir = instances_dir / "ConfettiaSMP"
     mc_dir = instance_dir / ".minecraft"
     mods_dir = mc_dir / "mods"
@@ -272,6 +307,7 @@ def build_prism_instance(instances_dir: Path, temp_zip: Path, clean_mods: bool, 
 
     loader_version = fetch_latest_fabric_loader_version()
 
+    # Prism stores the Minecraft and Fabric components in mmc-pack.json.
     mmc_pack = {
         "components": [
             {
@@ -301,6 +337,7 @@ def build_prism_instance(instances_dir: Path, temp_zip: Path, clean_mods: bool, 
     with open(instance_dir / "mmc-pack.json", "w", encoding="utf-8") as f:
         json.dump(mmc_pack, f, indent=4)
 
+    # instance.cfg contains the human-readable instance name and basic format.
     cfg_content = (
         "InstanceType=OneSix\n"
         f"Name={PROFILE_NAME}\n"
@@ -317,6 +354,8 @@ def build_prism_instance(instances_dir: Path, temp_zip: Path, clean_mods: bool, 
 
 
 class ModpackInstallerApp:
+    """Own the installer window and run the installation without freezing it."""
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
@@ -324,12 +363,21 @@ class ModpackInstallerApp:
         self.root.resizable(False, False)
         self.root.configure(bg=COLOR_BG)
 
+        # Use the custom icon in the window title bar when the asset is present.
+        if ICON_PATH.exists():
+            try:
+                self.root.iconbitmap(default=str(ICON_PATH))
+            except tk.TclError:
+                pass
+
         self.target_dir = get_default_mc_dir()
 
         self.setup_styles()
         self.setup_ui()
+        self.console_visible = False
 
     def setup_styles(self):
+        """Define the shared fonts, colors, and button styles for the window."""
         style = ttk.Style()
         style.theme_use('clam')
 
@@ -351,6 +399,7 @@ class ModpackInstallerApp:
         style.configure("Green.Horizontal.TProgressbar", troughcolor=COLOR_PANEL, bordercolor=COLOR_BORDER, background=COLOR_GREEN)
 
     def setup_ui(self):
+        """Build the controls the user needs to choose a folder and install."""
         header_frame = tk.Frame(self.root, bg=COLOR_BG)
         header_frame.pack(fill="x", padx=20, pady=(18, 10))
 
@@ -382,24 +431,82 @@ class ModpackInstallerApp:
         self.status_label = ttk.Label(self.root, text="Ready to compile standalone version", font=("Segoe UI", 9), foreground=COLOR_SUBTEXT)
         self.status_label.pack(anchor="w", padx=20, pady=(10, 2))
 
-        self.progress_bar = ttk.Progressbar(self.root, mode="determinate", style="Green.Horizontal.TProgressbar")
-        self.progress_bar.pack(fill="x", padx=20, pady=2)
+        # Keep the progress bar and console toggle on one row so the extra
+        # diagnostics are available without taking space from the main layout.
+        progress_frame = tk.Frame(self.root, bg=COLOR_BG)
+        progress_frame.pack(fill="x", padx=20, pady=2)
+
+        self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate", style="Green.Horizontal.TProgressbar")
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+
+        self.console_button = ttk.Button(
+            progress_frame,
+            text="☷",
+            width=3,
+            style="Secondary.TButton",
+            command=self.toggle_console,
+        )
+        self.console_button.pack(side="right", padx=(6, 0))
+
+        # The console starts collapsed and becomes visible when the icon is clicked.
+        self.console_frame = tk.Frame(self.root, bg="#181818", borderwidth=0, highlightthickness=0)
+        self.console_text = tk.Text(
+            self.console_frame,
+            height=12,
+            wrap="word",
+            state="disabled",
+            bg="#181818",
+            fg=COLOR_SUBTEXT,
+            insertbackground=COLOR_TEXT,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Consolas", 8),
+        )
+        console_scrollbar = ttk.Scrollbar(self.console_frame, orient="vertical", command=self.console_text.yview)
+        self.console_text.configure(yscrollcommand=console_scrollbar.set)
+        self.console_text.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        console_scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
 
         self.install_btn = ttk.Button(self.root, text="Auto-Install Modpack", style="Accent.TButton", command=self.start_installation)
         self.install_btn.pack(pady=16, ipadx=12, ipady=4)
 
     def browse_path(self):
+        """Let the user choose a different Minecraft directory."""
         selected = filedialog.askdirectory(initialdir=self.path_entry.get())
         if selected:
             self.path_entry.delete(0, tk.END)
             self.path_entry.insert(0, selected)
 
+    def toggle_console(self):
+        """Show or hide the detailed installation console."""
+        if self.console_visible:
+            self.console_frame.pack_forget()
+            self.console_visible = False
+        else:
+            self.console_frame.pack(fill="both", expand=True, padx=20, pady=(2, 8))
+            self.console_visible = True
+
+    def append_console(self, text: str):
+        """Append a message to the console on Tkinter's main thread."""
+        def _append():
+            self.console_text.config(state="normal")
+            self.console_text.insert(tk.END, f"{text}\n")
+            self.console_text.see(tk.END)
+            self.console_text.config(state="disabled")
+
+        self.root.after(0, _append)
+
     def start_installation(self):
+        """Start installation in a background thread so the window stays responsive."""
         mc_path = Path(self.path_entry.get().strip())
         self.install_btn.config(state="disabled")
         threading.Thread(target=self.run_install, args=(mc_path,), daemon=True).start()
 
     def update_status(self, text: str, progress: float = None):
+        """Safely update Tkinter widgets from the worker thread."""
+        self.append_console(text)
+
         def _update():
             self.status_label.config(text=text)
             if progress is not None:
@@ -407,14 +514,17 @@ class ModpackInstallerApp:
         self.root.after(0, _update)
 
     def run_install(self, mc_path: Path):
+        """Download the pack, install it for supported launchers, and report errors."""
         temp_zip = mc_path / "temp_modpack.zip"
         installed_launchers = []
 
         try:
             mc_path.mkdir(parents=True, exist_ok=True)
 
-            # 1. Download modpack archive
+            # 1. Download the repository as a ZIP archive. A temporary file is
+            # used so incomplete downloads are never treated as valid packs.
             self.update_status("Downloading modpack from GitHub...", 10)
+            self.append_console(f"Source: {MODPACK_URL}")
             req = urllib.request.Request(MODPACK_URL, headers={'User-Agent': 'Mozilla/5.0'})
 
             with urllib.request.urlopen(req) as response, open(temp_zip, 'wb') as out_file:
@@ -434,7 +544,7 @@ class ModpackInstallerApp:
                 else:
                     out_file.write(response.read())
 
-            # 2. Build for Official Minecraft Launcher
+            # 2. Build the custom version used by the official launcher.
             self.update_status("Installing to Official Minecraft Launcher...", 50)
             build_official_version_package(
                 mc_path,
@@ -444,7 +554,7 @@ class ModpackInstallerApp:
             )
             installed_launchers.append("Official Minecraft Launcher")
 
-            # 3. Auto-detect and build for Prism Launcher if present
+            # 3. Also install a Prism instance when Prism's parent folder exists.
             prism_dir = get_default_prism_dir()
             if prism_dir and prism_dir.parent.exists():
                 self.update_status("Installing to Prism Launcher...", 80)
@@ -458,6 +568,7 @@ class ModpackInstallerApp:
 
             self.update_status("Installation completed successfully!", 100)
 
+            # Show only the launchers that were actually updated.
             installed_summary = "\n• " + "\n• ".join(installed_launchers)
             self.root.after(0, lambda: messagebox.showinfo(
                 "Success",
@@ -465,10 +576,14 @@ class ModpackInstallerApp:
             ))
 
         except Exception as e:
+            # Convert network, file-system, and launcher errors into a message
+            # the user can understand instead of closing the installer.
             self.update_status("Installation failed!", 0)
+            self.append_console(f"ERROR: {e}")
             self.root.after(0, lambda err=e: messagebox.showerror("Error", f"Failed to install modpack:\n{str(err)}"))
 
         finally:
+            # The archive is only needed during installation and may be large.
             if temp_zip.exists():
                 try:
                     os.remove(temp_zip)
